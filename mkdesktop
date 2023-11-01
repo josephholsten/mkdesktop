@@ -125,12 +125,9 @@ System files :\n
 
 Note :	existing originals will be saved with .bak extension" 60 80
 
-	readonly UNITY=1
-	readonly WIN32=$(( UNITY<<1 ))
-	readonly WIN64=$(( UNITY<<2 ))
-	readonly LINUX=$(( UNITY<<3 ))
-	
-	EMU=0
+	linux_emu=0
+	win32_emu=0
+	win64_emu=0
 
 	dialog --title "Query" --yesno \
 	"\nWould you like me to set up Wine (Windows emulation layer) ?" 7 50
@@ -147,11 +144,11 @@ Note :	existing originals will be saved with .bak extension" 60 80
 		if [ $r -eq 0 ]; then
 			case $out in
 				1)
-					EMU=$(( EMU | UNITY | WIN32 ))
+					win32_emu=1
 				;;
 		
 				2)
-					EMU=$(( EMU | UNITY | WIN64 ))
+					win64_emu=1
 				;;
 			esac
 		fi
@@ -163,53 +160,34 @@ Note :	existing originals will be saved with .bak extension" 60 80
 	r=$?
 	
 	if [ $r -eq 0 ]; then
-		EMU=$(( EMU | UNITY | LINUX ))
+		linux_emu=1
 	fi
 
-	my_emu=$(( EMU & UNITY ))
+	if [ $win32_emu -ne 0 ]; then
+		pkg install --yes i386-wine wine-mono wine-gecko
+	fi
 
-	result_win32=1
-	result_win64=1
-	result_linux=1
+	if [ $win64_emu -ne 0 ]; then
+		pkg install --yes wine wine-mono wine-gecko
+	fi
 
-	if [ $my_emu -ne 0 ]; then
-		my_emu=$(( EMU & WIN32 ))
-
-		if [ $my_emu -ne 0 ]; then
-			pkg install --yes i386-wine wine-mono wine-gecko
-			result_win32=$?
-		fi
-
-		my_emu=$(( EMU & WIN64 ))
-
-		if [ $my_emu -ne 0 ]; then
-			pkg install --yes wine wine-mono wine-gecko
-			result_win64=$?
-		fi
-
-		my_emu=$(( EMU & LINUX ))
-
-		if [ $my_emu -ne 0 ]; then
-			for kld in linux linux64; do
-				if ! kldstat -q -n $kld; then
-					kldload $kld
-					
-					[ $? -eq 0 ] || \
-					die "$LINENO" "Unable to kldload $kld"
-				fi
-			done
-			
-			pkg install --yes linux_base-c7
-			result_linux=$?
-		fi
+	if [ $linux_emu -ne 0 ]; then
+		for kld in linux linux64; do
+			if ! kldstat -q -n $kld; then
+				kldload $kld
+				
+				[ $? -eq 0 ] || \
+				die "$LINENO" "Unable to kldload $kld"
+			fi
+		done
+		
+		pkg install --yes linux_base-c7
 	fi
 
 	flavour_linux=false
 
-	if [ $(( EMU & LINUX )) -ne 0 ]; then
-		if [ $result_linux -eq 0 ]; then
-			flavour_linux=true
-		fi
+	if [ $linux_emu -ne 0 ]; then
+		flavour_linux=true
 	fi
 
 	#block for /etc/fstab
@@ -217,14 +195,12 @@ Note :	existing originals will be saved with .bak extension" 60 80
 		f=/etc/fstab
 		mangled=`echo $f | sed 's|[^[:alpha:]]|_|g'`
 		
-		if [ "$flavour_linux" = "false" ]; then
-			eval mandatory${mangled}="\"\
+		eval mandatory${mangled}="\"\
 fdescfs /dev/fd fdescfs rw 0 0
 procfs /proc procfs rw 0 0\""
-		else
+
+		if [ "$linux_emu" -ne 0 ]; then
 			eval mandatory${mangled}="\"\
-fdescfs /dev/fd fdescfs rw 0 0
-procfs /proc procfs rw 0 0
 tmpfs /compat/linux/dev/shm tmpfs rw,mode=1777,size=1g 0 0
 linprocfs /compat/linux/proc linprocfs rw 0 0
 linsysfs /compat/linux/sys linsysfs rw 0 0\""
@@ -233,20 +209,12 @@ linsysfs /compat/linux/sys linsysfs rw 0 0\""
 
 	#block for /etc/rc.conf
 	{
-		f=/etc/rc.conf
-		mangled=`echo $f | sed 's|[^[:alpha:]]|_|g'`
-		
-		if [ "$flavour_linux" = "false" ]; then
-			eval mandatory${mangled}="\"\
-devfs_system_ruleset=system
-dbus_enable=YES
-cupsd_enable=YES\""
-		else
-			eval mandatory${mangled}="\"\
-devfs_system_ruleset=system
-dbus_enable=YES
-cupsd_enable=YES
-linux_enable=YES\""
+		sysrc devfs_system_ruleset=system
+		sysrc dbus_enable=YES
+		sysrc cupsd_enable=YES
+
+		if [ "$linux_emu" -ne 0 ]; then
+			sysrc linux_enable=YES
 		fi
 	}
 
@@ -254,13 +222,12 @@ linux_enable=YES\""
 	{
 		f=/etc/sysctl.conf
 		mangled=`echo $f | sed 's|[^[:alpha:]]|_|g'`
-		
-		if [ "$flavour_linux" = "false" ]; then
-			eval mandatory${mangled}="\"\
+
+		eval mandatory${mangled}="\"\
 vfs.usermount=1\""
-		else
+		
+		if [ "$linux_emu" -ne 0 ]; then
 			eval mandatory${mangled}="\"\
-vfs.usermount=1
 compat.linux.osrelease=3.10.0
 kern.ipc.shm_allow_removed=1\""
 		fi
@@ -293,7 +260,7 @@ add path 'video*' mode 0664 group operator\""
 		f=/etc/devfs.conf
 		mangled=`echo $f | sed 's|[^[:alpha:]]|_|g'`
 		
-		if [ "$flavour_linux" = "false" ]; then
+		if [ "$linux_emu" -eq 0 ]; then
 			eval mandatory${mangled}="\"\
 own     /dev/pci        root:operator
 perm    /dev/pci        0664
@@ -342,37 +309,6 @@ link /compat/linux/dev/shm shm\""
 f_stagezero
 [ $? -eq 0 ] || die "$LINENO" "stage failure setting up graphics subsystem"
 
-dialog --title "The toor user account" --msgbox "\n
-In FreeBSD, it is generally preferable to su not to root, but to the
-toor builtin account which has the same UID as root (0). The root
-user's account must always use C shell - not a friendly shell.
-The toor user, who has the same privileges as root, may however use
-a different shell. For precisely that reason, in the next few screens
-we set up the toor user account." 18 36
-
-out=`dialog --stdout --radiolist "Select a shell for the toor user:" 10 30 2 \
-1 bash on \
-2 zsh off`
-
-if [ $? -eq 0 ]; then
-	case $out in
-		1) shell=bash;;
-		2) shell=zsh;;
-	esac
-
-	r=1
-
-	while [ $r -ne 0 ]; do
-		pkg install --yes $shell
-		r=$?
-	done
-
-	chsh -s /usr/local/bin/$shell toor
-
-	echo "Set the password for toor below:"
-	passwd toor
-fi
-
 pkglist=""
 
 out=`dialog --stdout --radiolist "Select a desktop environment to install:" 24 30 6 \
@@ -381,7 +317,8 @@ out=`dialog --stdout --radiolist "Select a desktop environment to install:" 24 3
 3 XFCE off \
 4 MATE off \
 5 LXDE off \
-6 Awesome (Tiling Window Manager) off`
+6 Awesome off`
+# 6 Awesome (Tiling Window Manager) off`
 
 r=$?
 
